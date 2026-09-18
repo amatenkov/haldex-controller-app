@@ -8,8 +8,6 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -22,7 +20,7 @@ import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
-    // Стандартный SPP UUID для последовательного порта Bluetooth (HC-05 / HC-06)
+    // Стандартный SPP UUID для последовательного порта Bluetooth
     private val sppUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     
     private var btSocket: BluetoothSocket? = null
@@ -129,14 +127,13 @@ class MainActivity : AppCompatActivity() {
         if (pairedDevices.isEmpty()) {
             tvStatus.text = "Нет сопряженных устройств в Android!"
             tvStatus.setTextColor(Color.parseColor("#FF1744"))
-            Toast.makeText(this, "Сначала сопрягите HC-06 в настройках телефона (PIN 1234)!", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Сначала спарьте HC-06 в настройках телефона (PIN 1234)!", Toast.LENGTH_LONG).show()
             return
         }
 
         val deviceList = pairedDevices.toList()
         val deviceNames = deviceList.map { "${it.name ?: "Неизвестно"}\n${it.address}" }.toTypedArray()
 
-        // Всегда открываем диалог со списком, чтобы точно выбрать нужный девайс
         AlertDialog.Builder(this)
             .setTitle("Выберите модуль для связи:")
             .setItems(deviceNames) { _, which ->
@@ -148,9 +145,7 @@ class MainActivity : AppCompatActivity() {
 
     @SuppressLint("MissingPermission")
     private fun connectToDevice(device: BluetoothDevice) {
-        if (isConnected) {
-            disconnect()
-        }
+        disconnect()
 
         val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
         val devName = device.name ?: device.address
@@ -159,42 +154,18 @@ class MainActivity : AppCompatActivity() {
         tvStatus.setTextColor(Color.parseColor("#FFD600"))
 
         Thread {
-            // Обязательно останавливаем поиск устройств
-            try { adapter.cancelDiscovery() } catch (ignored: Exception) {}
-
-            var socket: BluetoothSocket? = null
-            var connectSuccess = false
-
-            // Попытка 1: Официальный сокет (как в Serial Bluetooth Terminal)
             try {
-                socket = device.createRfcommSocketToServiceRecord(sppUuid)
+                // 1. Обязательно отменяем поиск устройств
+                adapter.cancelDiscovery()
+                Thread.sleep(150)
+
+                // 2. Получаем актуальный дескриптор по MAC-адресу
+                val remoteDevice = adapter.getRemoteDevice(device.address)
+
+                // 3. Для HC-06 СТРОГО используется Insecure сокет (без шифрования)
+                val socket = remoteDevice.createInsecureRfcommSocketToServiceRecord(sppUuid)
                 socket.connect()
-                connectSuccess = true
-            } catch (e1: Exception) {
-                // Если первая попытка сорвалась, обязательно закрываем сокет перед второй!
-                try { socket?.close() } catch (ignored: Exception) {}
 
-                // Попытка 2: Insecure сокет
-                try {
-                    socket = device.createInsecureRfcommSocketToServiceRecord(sppUuid)
-                    socket.connect()
-                    connectSuccess = true
-                } catch (e2: Exception) {
-                    try { socket?.close() } catch (ignored: Exception) {}
-                    
-                    // Попытка 3: Прямой канал 1 (рефлексия для китайских клонов)
-                    try {
-                        val method = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
-                        socket = method.invoke(device, 1) as BluetoothSocket
-                        socket.connect()
-                        connectSuccess = true
-                    } catch (e3: Exception) {
-                        try { socket?.close() } catch (ignored: Exception) {}
-                    }
-                }
-            }
-
-            if (connectSuccess && socket != null) {
                 btSocket = socket
                 outStream = socket.outputStream
                 inStream = socket.inputStream
@@ -205,10 +176,13 @@ class MainActivity : AppCompatActivity() {
                     tvStatus.setTextColor(Color.parseColor("#00E676"))
                     startRxLoop()
                 }
-            } else {
+            } catch (e: Exception) {
                 isConnected = false
+                try { btSocket?.close() } catch (ignored: Exception) {}
+                
+                // Выводим ТОЧНЫЙ текст системной ошибки для отладки
                 runOnUiThread {
-                    tvStatus.text = "Ошибка связи. Проверьте питание HC-06"
+                    tvStatus.text = "Ошибка: ${e.localizedMessage ?: e.message ?: "Сбой сокета"}"
                     tvStatus.setTextColor(Color.parseColor("#FF1744"))
                 }
             }
@@ -308,6 +282,7 @@ class MainActivity : AppCompatActivity() {
         try { inStream?.close() } catch (ignored: Exception) {}
         try { outStream?.close() } catch (ignored: Exception) {}
         try { btSocket?.close() } catch (ignored: Exception) {}
+        btSocket = null
     }
 
     override fun onDestroy() {
