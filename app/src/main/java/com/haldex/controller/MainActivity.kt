@@ -102,7 +102,7 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("MissingPermission")
     private fun connectToBluetooth() {
         if (isConnected) return
-        tvStatus.text = "Поиск HC-06..."
+        tvStatus.text = "Поиск модуля в сопряженных..."
         tvStatus.setTextColor(Color.parseColor("#FFD600"))
 
         val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
@@ -112,30 +112,57 @@ class MainActivity : AppCompatActivity() {
             null
         }
 
-        val targetDevice = paired?.find { it.name == "HC-06" || it.name == "HC-05" }
+        // Ищем любое устройство, в имени которого есть HC-06, HC-05 или BT
+        val targetDevice = paired?.find { 
+            val name = it.name ?: ""
+            name.contains("HC-06", ignoreCase = true) || 
+            name.contains("HC-05", ignoreCase = true) || 
+            name.contains("BT", ignoreCase = true)
+        }
 
         if (targetDevice == null) {
-            tvStatus.text = "Модуль HC-06 не найден в сопряженных!"
+            tvStatus.text = "HC-06 не найден в сопряженных Bluetooth!"
             tvStatus.setTextColor(Color.parseColor("#FF1744"))
             return
         }
 
         Thread {
             try {
-                btSocket = targetDevice.createRfcommSocketToServiceRecord(btUuid)
-                btSocket?.connect()
-                outStream = btSocket?.outputStream
-                inStream = btSocket?.inputStream
+                // Обязательно отменяем поиск устройств, иначе он блокирует открытие сокета
+                adapter.cancelDiscovery()
+
+                var socket: BluetoothSocket? = null
+
+                // Попытка 1: Стандартный сокет
+                try {
+                    socket = targetDevice.createRfcommSocketToServiceRecord(btUuid)
+                    socket.connect()
+                } catch (e1: Exception) {
+                    // Попытка 2: Insecure сокет (для китайских клонов)
+                    try {
+                        socket = targetDevice.createInsecureRfcommSocketToServiceRecord(btUuid)
+                        socket.connect()
+                    } catch (e2: Exception) {
+                        // Попытка 3: Прямой порт RFCOMM Channel 1 через рефлексию (как в Serial Bluetooth Terminal)
+                        val method = targetDevice.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                        socket = method.invoke(targetDevice, 1) as BluetoothSocket
+                        socket.connect()
+                    }
+                }
+
+                btSocket = socket
+                outStream = socket?.outputStream
+                inStream = socket?.inputStream
                 isConnected = true
 
                 runOnUiThread {
-                    tvStatus.text = "ПОДКЛЮЧЕНО К HC-06"
+                    tvStatus.text = "ПОДКЛЮЧЕНО К ${targetDevice.name}"
                     tvStatus.setTextColor(Color.parseColor("#00E676"))
                     startRxLoop()
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    tvStatus.text = "Ошибка подключения!"
+                    tvStatus.text = "Ошибка: ${e.localizedMessage ?: "Сбой сокета"}"
                     tvStatus.setTextColor(Color.parseColor("#FF1744"))
                 }
             }
@@ -176,7 +203,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun parseTelemetry(line: String) {
-        // Экранируем символ доллара через \$
         if (!line.startsWith("\$HDX") || !line.endsWith("*")) return
         val payload = line.removePrefix("\$HDX,").removeSuffix("*")
         val data = payload.split(",")
