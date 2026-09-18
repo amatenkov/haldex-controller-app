@@ -3,7 +3,11 @@ package com.haldex.controller
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothSocket
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothProfile
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
@@ -14,20 +18,17 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
-import java.io.InputStream
-import java.io.OutputStream
 import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
-    // Стандартный SPP UUID (ровно как в Serial Bluetooth Terminal)
-    private val sppUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
-    
-    private var btSocket: BluetoothSocket? = null
-    private var outStream: OutputStream? = null
-    private var inStream: InputStream? = null
+    // Стандартный дескриптор подписки на уведомления BLE
+    private val cccdUuid: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+    private var bluetoothGatt: BluetoothGatt? = null
+    private var writeCharacteristic: BluetoothGattCharacteristic? = null
     private var isConnected = false
-    private var rxThread: Thread? = null
+    private val rxBuffer = StringBuilder()
 
     private lateinit var tvStatus: TextView
     private lateinit var tvSpeed: TextView
@@ -85,9 +86,11 @@ class MainActivity : AppCompatActivity() {
         val permissions = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(android.Manifest.permission.BLUETOOTH_CONNECT)
+            permissions.add(android.Manifest.permission.BLUETOOTH_SCAN)
         } else {
             permissions.add(android.Manifest.permission.BLUETOOTH)
             permissions.add(android.Manifest.permission.BLUETOOTH_ADMIN)
+            permissions.add(android.Manifest.permission.ACCESS_FINE_LOCATION)
         }
 
         val needed = permissions.filter { ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
@@ -111,113 +114,143 @@ class MainActivity : AppCompatActivity() {
     private fun showDeviceSelectionDialog() {
         val adapter = BluetoothAdapter.getDefaultAdapter()
         if (adapter == null || !adapter.isEnabled) {
-            Toast.makeText(this, "Включите Bluetooth в телефоне!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Включите Bluetooth!", Toast.LENGTH_SHORT).show()
             return
         }
 
         val pairedDevices: Set<BluetoothDevice> = adapter.bondedDevices ?: emptySet()
 
         if (pairedDevices.isEmpty()) {
-            tvStatus.text = "Нет сопряжённых устройств!"
+            tvStatus.text = "Нет сопряженных BLE устройств!"
             tvStatus.setTextColor(Color.parseColor("#FF1744"))
-            Toast.makeText(this, "Спарьте HC-06 в настройках Android (PIN 1234)!", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Спарьте HC-06 в настройках телефона (PIN 1234)!", Toast.LENGTH_LONG).show()
             return
         }
 
         val deviceList = pairedDevices.toList()
-        val deviceNames = deviceList.map { "${it.name ?: "HC-06"}\n${it.address}" }.toTypedArray()
+        val deviceNames = deviceList.map { "${it.name ?: "HC-06 (BLE)"}\n${it.address}" }.toTypedArray()
 
         AlertDialog.Builder(this)
-            .setTitle("Выберите модуль Bluetooth:")
+            .setTitle("Выберите ваш BLE модуль:")
             .setItems(deviceNames) { _, which ->
-                connectToDevice(deviceList[which])
+                connectToBleDevice(deviceList[which])
             }
             .setNegativeButton("Отмена", null)
             .show()
     }
 
     @SuppressLint("MissingPermission")
-    private fun connectToDevice(device: BluetoothDevice) {
+    private fun connectToBleDevice(device: BluetoothDevice) {
         disconnect()
 
-        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
         val devName = device.name ?: device.address
-
-        tvStatus.text = "Соединение с $devName..."
+        tvStatus.text = "Подключение по BLE к $devName..."
         tvStatus.setTextColor(Color.parseColor("#FFD600"))
 
-        Thread {
-            try {
-                // Получаем чистый дескриптор устройства по MAC-адресу
-                val cleanDevice = adapter.getRemoteDevice(device.address)
-
-                // СТРОГО ОРИГИНАЛЬНЫЙ СПОСОБ ИЗ KAI MORICH (без рефлексий и костылей)
-                val socket = cleanDevice.createRfcommSocketToServiceRecord(sppUuid)
-                socket.connect()
-
-                btSocket = socket
-                outStream = socket.outputStream
-                inStream = socket.inputStream
-                isConnected = true
-
-                runOnUiThread {
-                    tvStatus.text = "ПОДКЛЮЧЕНО: $devName"
-                    tvStatus.setTextColor(Color.parseColor("#00E676"))
-                    startRxLoop()
-                }
-            } catch (e: Exception) {
-                isConnected = false
-                try { btSocket?.close() } catch (ignored: Exception) {}
-                btSocket = null
-
-                runOnUiThread {
-                    tvStatus.text = "Ошибка: ${e.localizedMessage ?: e.message ?: "Сбой сокета"}"
-                    tvStatus.setTextColor(Color.parseColor("#FF1744"))
-                }
-            }
-        }.start()
+        // Подключаемся строго через Bluetooth Low Energy стек (TRANSPORT_LE)
+        bluetoothGatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        } else {
+            device.connectGatt(this, false, gattCallback)
+        }
     }
 
-    private fun startRxLoop() {
-        rxThread = Thread {
-            val buffer = ByteArray(1024)
-            var bytes: Int
-            val builder = StringBuilder()
-
-            while (isConnected) {
-                try {
-                    bytes = inStream?.read(buffer) ?: -1
-                    if (bytes > 0) {
-                        val str = String(buffer, 0, bytes)
-                        builder.append(str)
-                        if (builder.contains("\n")) {
-                            val lines = builder.toString().split("\n")
-                            for (i in 0 until lines.size - 1) {
-                                val trimmed = lines[i].trim()
-                                if (trimmed.isNotEmpty()) {
-                                    parseTelemetry(trimmed)
-                                }
-                            }
-                            builder.setLength(0)
-                            builder.append(lines.last())
-                        }
-                    } else if (bytes < 0) {
-                        break
-                    }
-                } catch (e: Exception) {
-                    break
+    private val gattCallback = object : BluetoothGattCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                runOnUiThread {
+                    tvStatus.text = "ПОДКЛЮЧЕНО (BLE). Поиск каналов..."
+                    tvStatus.setTextColor(Color.parseColor("#FFD600"))
                 }
-            }
-
-            if (isConnected) {
-                isConnected = false
+                // Ищем доступные GATT-сервисы
+                gatt.discoverServices()
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 runOnUiThread {
                     tvStatus.text = "Связь потеряна!"
                     tvStatus.setTextColor(Color.parseColor("#FF1744"))
                 }
+                disconnect()
             }
         }
-        rxThread?.start()
+
+        @SuppressLint("MissingPermission")
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                var notifyChar: BluetoothGattCharacteristic? = null
+
+                // Универсальный поиск характеристик UART на любых BLE-чипах
+                for (service in gatt.services) {
+                    for (ch in service.characteristics) {
+                        val props = ch.properties
+                        // Поиск канала чтения (Notify / Indicate)
+                        if ((props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) ||
+                            (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)) {
+                            notifyChar = ch
+                        }
+                        // Поиск канала записи команд (Write / Write Without Response)
+                        if ((props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
+                            (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)) {
+                            writeCharacteristic = ch
+                        }
+                    }
+                }
+
+                if (notifyChar != null) {
+                    // Включаем подписку на приём данных
+                    gatt.setCharacteristicNotification(notifyChar, true)
+                    val descriptor = notifyChar.getDescriptor(cccdUuid)
+                    if (descriptor != null) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                        } else {
+                            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                            gatt.writeDescriptor(descriptor)
+                        }
+                    }
+
+                    isConnected = true
+                    runOnUiThread {
+                        tvStatus.text = "ПОДКЛЮЧЕНО (BLE): ${gatt.device.name ?: "HC-06"}"
+                        tvStatus.setTextColor(Color.parseColor("#00E676"))
+                    }
+                } else {
+                    runOnUiThread {
+                        tvStatus.text = "Ошибка: UART канал не найден"
+                        tvStatus.setTextColor(Color.parseColor("#FF1744"))
+                    }
+                }
+            }
+        }
+
+        // Обработка данных для старых версий Android
+        @Deprecated("Deprecated in Java")
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            val data = characteristic.value ?: return
+            handleIncomingBytes(data)
+        }
+
+        // Обработка данных для Android 13+ (API 33+)
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+            handleIncomingBytes(value)
+        }
+    }
+
+    private fun handleIncomingBytes(bytes: ByteArray) {
+        val str = String(bytes)
+        rxBuffer.append(str)
+
+        if (rxBuffer.contains("\n")) {
+            val lines = rxBuffer.toString().split("\n")
+            for (i in 0 until lines.size - 1) {
+                val trimmed = lines[i].trim()
+                if (trimmed.isNotEmpty()) {
+                    parseTelemetry(trimmed)
+                }
+            }
+            rxBuffer.clear()
+            rxBuffer.append(lines.last())
+        }
     }
 
     private fun parseTelemetry(line: String) {
@@ -261,28 +294,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun sendCommand(cmd: String) {
-        if (!isConnected) {
+        val ch = writeCharacteristic
+        val gatt = bluetoothGatt
+        if (!isConnected || ch == null || gatt == null) {
             Toast.makeText(this, "Нет связи с модулем!", Toast.LENGTH_SHORT).show()
             return
         }
-        Thread {
-            try {
-                outStream?.write(cmd.toByteArray())
-                outStream?.flush()
-            } catch (ignored: Exception) {
-            }
-        }.start()
+
+        val bytes = cmd.toByteArray()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeCharacteristic(ch, bytes, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+        } else {
+            ch.value = bytes
+            ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            gatt.writeCharacteristic(ch)
+        }
     }
 
+    @SuppressLint("MissingPermission")
     private fun disconnect() {
         isConnected = false
-        try { inStream?.close() } catch (ignored: Exception) {}
-        try { outStream?.close() } catch (ignored: Exception) {}
-        try { btSocket?.close() } catch (ignored: Exception) {}
-        inStream = null
-        outStream = null
-        btSocket = null
+        writeCharacteristic = null
+        try { bluetoothGatt?.disconnect() } catch (ignored: Exception) {}
+        try { bluetoothGatt?.close() } catch (ignored: Exception) {}
+        bluetoothGatt = null
     }
 
     override fun onDestroy() {
