@@ -20,6 +20,7 @@ import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
+    // Стандартный SPP UUID (ровно как в Serial Bluetooth Terminal)
     private val sppUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     
     private var btSocket: BluetoothSocket? = null
@@ -83,7 +84,6 @@ class MainActivity : AppCompatActivity() {
     private fun checkPermissionsAndShowDevicePicker() {
         val permissions = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // Для сопряженных устройств нужен только CONNECT (без требования геолокации/SCAN)
             permissions.add(android.Manifest.permission.BLUETOOTH_CONNECT)
         } else {
             permissions.add(android.Manifest.permission.BLUETOOTH)
@@ -110,20 +110,15 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("MissingPermission")
     private fun showDeviceSelectionDialog() {
         val adapter = BluetoothAdapter.getDefaultAdapter()
-        if (adapter == null) {
-            Toast.makeText(this, "Bluetooth не найден!", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        if (!adapter.isEnabled) {
-            Toast.makeText(this, "Включите Bluetooth!", Toast.LENGTH_SHORT).show()
+        if (adapter == null || !adapter.isEnabled) {
+            Toast.makeText(this, "Включите Bluetooth в телефоне!", Toast.LENGTH_SHORT).show()
             return
         }
 
         val pairedDevices: Set<BluetoothDevice> = adapter.bondedDevices ?: emptySet()
 
         if (pairedDevices.isEmpty()) {
-            tvStatus.text = "Нет сопряжённых устройств в телефоне!"
+            tvStatus.text = "Нет сопряжённых устройств!"
             tvStatus.setTextColor(Color.parseColor("#FF1744"))
             Toast.makeText(this, "Спарьте HC-06 в настройках Android (PIN 1234)!", Toast.LENGTH_LONG).show()
             return
@@ -133,7 +128,7 @@ class MainActivity : AppCompatActivity() {
         val deviceNames = deviceList.map { "${it.name ?: "HC-06"}\n${it.address}" }.toTypedArray()
 
         AlertDialog.Builder(this)
-            .setTitle("Выберите ваш модуль:")
+            .setTitle("Выберите модуль Bluetooth:")
             .setItems(deviceNames) { _, which ->
                 connectToDevice(deviceList[which])
             }
@@ -152,56 +147,14 @@ class MainActivity : AppCompatActivity() {
         tvStatus.setTextColor(Color.parseColor("#FFD600"))
 
         Thread {
-            try { adapter.cancelDiscovery() } catch (ignored: Exception) {}
-
-            var socket: BluetoothSocket? = null
-            var success = false
-
-            // 1. Принудительное подключение к RFCOMM Channel 1 (обход бага сокета в HC-06)
             try {
-                val m = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
-                socket = m.invoke(device, 1) as BluetoothSocket
+                // Получаем чистый дескриптор устройства по MAC-адресу
+                val cleanDevice = adapter.getRemoteDevice(device.address)
+
+                // СТРОГО ОРИГИНАЛЬНЫЙ СПОСОБ ИЗ KAI MORICH (без рефлексий и костылей)
+                val socket = cleanDevice.createRfcommSocketToServiceRecord(sppUuid)
                 socket.connect()
-                success = true
-            } catch (e1: Exception) {
-                try { socket?.close() } catch (ignored: Exception) {}
-                socket = null
-            }
 
-            // 2. Если прошивка телефона блокирует вызов канала, пробуем Insecure SPP
-            if (!success) {
-                try {
-                    Thread.sleep(200)
-                    socket = device.createInsecureRfcommSocketToServiceRecord(sppUuid)
-                    socket.connect()
-                    success = true
-                } catch (e2: Exception) {
-                    try { socket?.close() } catch (ignored: Exception) {}
-                    socket = null
-                }
-            }
-
-            // 3. Последняя попытка через стандартный сокет
-            if (!success) {
-                try {
-                    Thread.sleep(200)
-                    socket = device.createRfcommSocketToServiceRecord(sppUuid)
-                    socket.connect()
-                    success = true
-                } catch (e3: Exception) {
-                    try { socket?.close() } catch (ignored: Exception) {}
-                    socket = null
-                    
-                    isConnected = false
-                    runOnUiThread {
-                        tvStatus.text = "Ошибка: ${e3.localizedMessage ?: e3.message ?: "Таймаут сокета"}"
-                        tvStatus.setTextColor(Color.parseColor("#FF1744"))
-                    }
-                    return@Thread
-                }
-            }
-
-            if (success && socket != null) {
                 btSocket = socket
                 outStream = socket.outputStream
                 inStream = socket.inputStream
@@ -211,6 +164,15 @@ class MainActivity : AppCompatActivity() {
                     tvStatus.text = "ПОДКЛЮЧЕНО: $devName"
                     tvStatus.setTextColor(Color.parseColor("#00E676"))
                     startRxLoop()
+                }
+            } catch (e: Exception) {
+                isConnected = false
+                try { btSocket?.close() } catch (ignored: Exception) {}
+                btSocket = null
+
+                runOnUiThread {
+                    tvStatus.text = "Ошибка: ${e.localizedMessage ?: e.message ?: "Сбой сокета"}"
+                    tvStatus.setTextColor(Color.parseColor("#FF1744"))
                 }
             }
         }.start()
@@ -231,18 +193,27 @@ class MainActivity : AppCompatActivity() {
                         if (builder.contains("\n")) {
                             val lines = builder.toString().split("\n")
                             for (i in 0 until lines.size - 1) {
-                                parseTelemetry(lines[i].trim())
+                                val trimmed = lines[i].trim()
+                                if (trimmed.isNotEmpty()) {
+                                    parseTelemetry(trimmed)
+                                }
                             }
                             builder.setLength(0)
                             builder.append(lines.last())
                         }
+                    } else if (bytes < 0) {
+                        break
                     }
                 } catch (e: Exception) {
-                    isConnected = false
-                    runOnUiThread {
-                        tvStatus.text = "Связь потеряна!"
-                        tvStatus.setTextColor(Color.parseColor("#FF1744"))
-                    }
+                    break
+                }
+            }
+
+            if (isConnected) {
+                isConnected = false
+                runOnUiThread {
+                    tvStatus.text = "Связь потеряна!"
+                    tvStatus.setTextColor(Color.parseColor("#FF1744"))
                 }
             }
         }
@@ -309,6 +280,8 @@ class MainActivity : AppCompatActivity() {
         try { inStream?.close() } catch (ignored: Exception) {}
         try { outStream?.close() } catch (ignored: Exception) {}
         try { btSocket?.close() } catch (ignored: Exception) {}
+        inStream = null
+        outStream = null
         btSocket = null
     }
 
