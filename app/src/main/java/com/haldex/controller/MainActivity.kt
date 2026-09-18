@@ -1,16 +1,13 @@
 package com.haldex.controller
 
-import android.Manifest
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -50,7 +47,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Связываем элементы интерфейса
         tvStatus = findViewById(R.id.tvStatus)
         tvSpeed = findViewById(R.id.tvSpeed)
         tvTemp = findViewById(R.id.tvTemp)
@@ -72,7 +68,6 @@ class MainActivity : AppCompatActivity() {
             checkPermissionsAndConnect()
         }
 
-        // Слушатели кнопок отправки команд
         btnEco.setOnClickListener { sendCommand("E") }
         btnAuto.setOnClickListener { sendCommand("A") }
         btnAwd.setOnClickListener { sendCommand("W") }
@@ -88,12 +83,12 @@ class MainActivity : AppCompatActivity() {
     private fun checkPermissionsAndConnect() {
         val permissions = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
-            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(android.Manifest.permission.BLUETOOTH_CONNECT)
+            permissions.add(android.Manifest.permission.BLUETOOTH_SCAN)
         } else {
-            permissions.add(Manifest.permission.BLUETOOTH)
-            permissions.add(Manifest.permission.BLUETOOTH_ADMIN)
-            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+            permissions.add(android.Manifest.permission.BLUETOOTH)
+            permissions.add(android.Manifest.permission.BLUETOOTH_ADMIN)
+            permissions.add(android.Manifest.permission.ACCESS_FINE_LOCATION)
         }
 
         val needed = permissions.filter { ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
@@ -104,6 +99,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun connectToBluetooth() {
         if (isConnected) return
         tvStatus.text = "Поиск HC-06..."
@@ -112,7 +108,7 @@ class MainActivity : AppCompatActivity() {
         val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
         val paired: Set<BluetoothDevice>? = try {
             adapter.bondedDevices
-        } catch (e: SecurityException) {
+        } catch (e: Exception) {
             null
         }
 
@@ -181,7 +177,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun parseTelemetry(line: String) {
         if (!line.startsWith("$HDX") || !line.endsWith("*")) return
-        // Убираем маркеры пакета и разбиваем по запятой
         val payload = line.replace("$HDX,", "").replace("*", "")
         val data = payload.split(",")
         if (data.size < 9) return
@@ -198,7 +193,6 @@ class MainActivity : AppCompatActivity() {
                 val brake = data[7].toInt()
                 val pump = data[8].toInt()
 
-                // Обновление интерфейса
                 tvSpeed.text = "$speed км/ч"
                 tvTemp.text = "$temp °C"
                 tvSlip.text = String.format("%.1f км/ч", slip)
@@ -207,20 +201,17 @@ class MainActivity : AppCompatActivity() {
                 tvExtraInfo.text = "Тормоз: " + (if (brake == 1) "АКТИВЕН" else "ОТПУЩЕН") + 
                                   " | Насос: " + (if (pump == 1) "ВКЛ (5V)" else "ВЫКЛ (0V)")
 
-                // Подсветка кнопок текущего режима
                 btnEco.setBackgroundColor(if (mode == 0) Color.parseColor("#00E676") else Color.parseColor("#2E334D"))
                 btnAuto.setBackgroundColor(if (mode == 1) Color.parseColor("#00E5FF") else Color.parseColor("#2E334D"))
                 btnAwd.setBackgroundColor(if (mode == 2) Color.parseColor("#FFD600") else Color.parseColor("#2E334D"))
                 
-                btnEco.setTextColor(if (mode == 0) Color.parseColor("#0F111A") else Color.white)
-                btnAuto.setTextColor(if (mode == 1) Color.parseColor("#0F111A") else Color.white)
-                btnAwd.setTextColor(if (mode == 2) Color.parseColor("#0F111A") else Color.white)
+                btnEco.setTextColor(if (mode == 0) Color.parseColor("#0F111A") else Color.parseColor("#FFFFFF"))
+                btnAuto.setTextColor(if (mode == 1) Color.parseColor("#0F111A") else Color.parseColor("#FFFFFF"))
+                btnAwd.setTextColor(if (mode == 2) Color.parseColor("#0F111A") else Color.parseColor("#FFFFFF"))
 
-                // Добавление точек на осциллограф
                 graphView.addPoints(targetCurrent, actualCurrent)
 
             } catch (e: Exception) {
-                // Ошибка парсинга отдельной строки
             }
         }
     }
@@ -235,7 +226,6 @@ class MainActivity : AppCompatActivity() {
                 outStream?.write(cmd.toByteArray())
                 outStream?.flush()
             } catch (e: Exception) {
-                // Ошибка отправки
             }
         }.start()
     }
