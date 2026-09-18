@@ -8,6 +8,8 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -20,7 +22,9 @@ import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
+    // Стандартный SPP UUID для последовательного порта Bluetooth (HC-05 / HC-06)
     private val sppUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+    
     private var btSocket: BluetoothSocket? = null
     private var outStream: OutputStream? = null
     private var inStream: InputStream? = null
@@ -77,8 +81,6 @@ class MainActivity : AppCompatActivity() {
         btnPump.setOnClickListener { sendCommand("P") }
         btnKill.setOnClickListener { sendCommand("K") }
         btnReset.setOnClickListener { sendCommand("R") }
-
-        checkPermissionsAndShowDevicePicker()
     }
 
     private fun checkPermissionsAndShowDevicePicker() {
@@ -100,84 +102,113 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 101 && grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+            showDeviceSelectionDialog()
+        } else {
+            Toast.makeText(this, "Нужны разрешения Bluetooth!", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     @SuppressLint("MissingPermission")
     private fun showDeviceSelectionDialog() {
-        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+        if (adapter == null) {
+            Toast.makeText(this, "Bluetooth не поддерживается!", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (!adapter.isEnabled) {
+            Toast.makeText(this, "Включите Bluetooth в телефоне!", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         val pairedDevices: Set<BluetoothDevice> = adapter.bondedDevices ?: emptySet()
 
         if (pairedDevices.isEmpty()) {
-            tvStatus.text = "Нет сопряжённых устройств!"
+            tvStatus.text = "Нет сопряженных устройств в Android!"
             tvStatus.setTextColor(Color.parseColor("#FF1744"))
+            Toast.makeText(this, "Сначала сопрягите HC-06 в настройках телефона (PIN 1234)!", Toast.LENGTH_LONG).show()
             return
         }
 
         val deviceList = pairedDevices.toList()
-        val deviceNames = deviceList.map { "${it.name ?: "Неизвестно"}\n(${it.address})" }.toTypedArray()
+        val deviceNames = deviceList.map { "${it.name ?: "Неизвестно"}\n${it.address}" }.toTypedArray()
 
-        // Если HC-06 уже спарен один, подключаемся сразу к нему
-        val hc06 = deviceList.find { (it.name ?: "").contains("HC-06", ignoreCase = true) }
-        if (hc06 != null && !isConnected) {
-            connectToDevice(hc06)
-            return
-        }
-
-        // Иначе открываем выбор
+        // Всегда открываем диалог со списком, чтобы точно выбрать нужный девайс
         AlertDialog.Builder(this)
-            .setTitle("Выберите модуль Bluetooth")
+            .setTitle("Выберите модуль для связи:")
             .setItems(deviceNames) { _, which ->
                 connectToDevice(deviceList[which])
             }
+            .setNegativeButton("Отмена", null)
             .show()
     }
 
     @SuppressLint("MissingPermission")
     private fun connectToDevice(device: BluetoothDevice) {
-        if (isConnected) return
-        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
+        if (isConnected) {
+            disconnect()
+        }
 
-        tvStatus.text = "Подключение к ${device.name ?: device.address}..."
+        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
+        val devName = device.name ?: device.address
+
+        tvStatus.text = "Соединение с $devName..."
         tvStatus.setTextColor(Color.parseColor("#FFD600"))
 
         Thread {
+            // Обязательно останавливаем поиск устройств
+            try { adapter.cancelDiscovery() } catch (ignored: Exception) {}
+
+            var socket: BluetoothSocket? = null
+            var connectSuccess = false
+
+            // Попытка 1: Официальный сокет (как в Serial Bluetooth Terminal)
             try {
-                // 1. Обязательно отменяем поиск и даем паузу чипу
-                adapter.cancelDiscovery()
-                Thread.sleep(150)
+                socket = device.createRfcommSocketToServiceRecord(sppUuid)
+                socket.connect()
+                connectSuccess = true
+            } catch (e1: Exception) {
+                // Если первая попытка сорвалась, обязательно закрываем сокет перед второй!
+                try { socket?.close() } catch (ignored: Exception) {}
 
-                var socket: BluetoothSocket? = null
-
-                // 2. Метод 1: Прямое подключение к RFCOMM каналу 1 (как в Serial Bluetooth Terminal)
+                // Попытка 2: Insecure сокет
                 try {
-                    val m = device.javaClass.getMethod("createInsecureRfcommSocket", Int::class.javaPrimitiveType)
-                    socket = m.invoke(device, 1) as BluetoothSocket
+                    socket = device.createInsecureRfcommSocketToServiceRecord(sppUuid)
                     socket.connect()
-                } catch (e1: Exception) {
+                    connectSuccess = true
+                } catch (e2: Exception) {
+                    try { socket?.close() } catch (ignored: Exception) {}
+                    
+                    // Попытка 3: Прямой канал 1 (рефлексия для китайских клонов)
                     try {
-                        val m = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
-                        socket = m.invoke(device, 1) as BluetoothSocket
+                        val method = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                        socket = method.invoke(device, 1) as BluetoothSocket
                         socket.connect()
-                    } catch (e2: Exception) {
-                        // Метод 2: Стандартный сокет через SPP UUID
-                        socket = device.createInsecureRfcommSocketToServiceRecord(sppUuid)
-                        socket.connect()
+                        connectSuccess = true
+                    } catch (e3: Exception) {
+                        try { socket?.close() } catch (ignored: Exception) {}
                     }
                 }
+            }
 
+            if (connectSuccess && socket != null) {
                 btSocket = socket
-                outStream = socket?.outputStream
-                inStream = socket?.inputStream
+                outStream = socket.outputStream
+                inStream = socket.inputStream
                 isConnected = true
 
                 runOnUiThread {
-                    tvStatus.text = "ПОДКЛЮЧЕНО К ${device.name ?: "HC-06"}"
+                    tvStatus.text = "ПОДКЛЮЧЕНО: $devName"
                     tvStatus.setTextColor(Color.parseColor("#00E676"))
                     startRxLoop()
                 }
-            } catch (e: Exception) {
+            } else {
                 isConnected = false
-                try { btSocket?.close() } catch (ignored: Exception) {}
                 runOnUiThread {
-                    tvStatus.text = "Ошибка: ${e.message ?: "Сбой сокета"}"
+                    tvStatus.text = "Ошибка связи. Проверьте питание HC-06"
                     tvStatus.setTextColor(Color.parseColor("#FF1744"))
                 }
             }
@@ -272,11 +303,15 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    private fun disconnect() {
+        isConnected = false
+        try { inStream?.close() } catch (ignored: Exception) {}
+        try { outStream?.close() } catch (ignored: Exception) {}
+        try { btSocket?.close() } catch (ignored: Exception) {}
+    }
+
     override fun onDestroy() {
         super.onDestroy()
-        isConnected = false
-        try {
-            btSocket?.close()
-        } catch (ignored: Exception) {}
+        disconnect()
     }
 }
