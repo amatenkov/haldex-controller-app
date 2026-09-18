@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import java.io.InputStream
@@ -19,7 +20,7 @@ import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
-    private val btUuid = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+    private val sppUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     private var btSocket: BluetoothSocket? = null
     private var outStream: OutputStream? = null
     private var inStream: InputStream? = null
@@ -65,7 +66,7 @@ class MainActivity : AppCompatActivity() {
         btnReset = findViewById(R.id.btnReset)
 
         findViewById<Button>(R.id.btnConnect).setOnClickListener {
-            checkPermissionsAndConnect()
+            checkPermissionsAndShowDevicePicker()
         }
 
         btnEco.setOnClickListener { sendCommand("E") }
@@ -77,10 +78,10 @@ class MainActivity : AppCompatActivity() {
         btnKill.setOnClickListener { sendCommand("K") }
         btnReset.setOnClickListener { sendCommand("R") }
 
-        checkPermissionsAndConnect()
+        checkPermissionsAndShowDevicePicker()
     }
 
-    private fun checkPermissionsAndConnect() {
+    private fun checkPermissionsAndShowDevicePicker() {
         val permissions = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(android.Manifest.permission.BLUETOOTH_CONNECT)
@@ -95,57 +96,69 @@ class MainActivity : AppCompatActivity() {
         if (needed.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, needed.toTypedArray(), 101)
         } else {
-            connectToBluetooth()
+            showDeviceSelectionDialog()
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun connectToBluetooth() {
-        if (isConnected) return
-        tvStatus.text = "Поиск модуля в сопряженных..."
-        tvStatus.setTextColor(Color.parseColor("#FFD600"))
-
+    private fun showDeviceSelectionDialog() {
         val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
-        val paired: Set<BluetoothDevice>? = try {
-            adapter.bondedDevices
-        } catch (e: Exception) {
-            null
-        }
+        val pairedDevices: Set<BluetoothDevice> = adapter.bondedDevices ?: emptySet()
 
-        // Ищем любое устройство, в имени которого есть HC-06, HC-05 или BT
-        val targetDevice = paired?.find { 
-            val name = it.name ?: ""
-            name.contains("HC-06", ignoreCase = true) || 
-            name.contains("HC-05", ignoreCase = true) || 
-            name.contains("BT", ignoreCase = true)
-        }
-
-        if (targetDevice == null) {
-            tvStatus.text = "HC-06 не найден в сопряженных Bluetooth!"
+        if (pairedDevices.isEmpty()) {
+            tvStatus.text = "Нет сопряжённых устройств!"
             tvStatus.setTextColor(Color.parseColor("#FF1744"))
             return
         }
 
+        val deviceList = pairedDevices.toList()
+        val deviceNames = deviceList.map { "${it.name ?: "Неизвестно"}\n(${it.address})" }.toTypedArray()
+
+        // Если HC-06 уже спарен один, подключаемся сразу к нему
+        val hc06 = deviceList.find { (it.name ?: "").contains("HC-06", ignoreCase = true) }
+        if (hc06 != null && !isConnected) {
+            connectToDevice(hc06)
+            return
+        }
+
+        // Иначе открываем выбор
+        AlertDialog.Builder(this)
+            .setTitle("Выберите модуль Bluetooth")
+            .setItems(deviceNames) { _, which ->
+                connectToDevice(deviceList[which])
+            }
+            .show()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun connectToDevice(device: BluetoothDevice) {
+        if (isConnected) return
+        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
+
+        tvStatus.text = "Подключение к ${device.name ?: device.address}..."
+        tvStatus.setTextColor(Color.parseColor("#FFD600"))
+
         Thread {
             try {
-                // Обязательно отменяем поиск устройств, иначе он блокирует открытие сокета
+                // 1. Обязательно отменяем поиск и даем паузу чипу
                 adapter.cancelDiscovery()
+                Thread.sleep(150)
 
                 var socket: BluetoothSocket? = null
 
-                // Попытка 1: Стандартный сокет
+                // 2. Метод 1: Прямое подключение к RFCOMM каналу 1 (как в Serial Bluetooth Terminal)
                 try {
-                    socket = targetDevice.createRfcommSocketToServiceRecord(btUuid)
+                    val m = device.javaClass.getMethod("createInsecureRfcommSocket", Int::class.javaPrimitiveType)
+                    socket = m.invoke(device, 1) as BluetoothSocket
                     socket.connect()
                 } catch (e1: Exception) {
-                    // Попытка 2: Insecure сокет (для китайских клонов)
                     try {
-                        socket = targetDevice.createInsecureRfcommSocketToServiceRecord(btUuid)
+                        val m = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                        socket = m.invoke(device, 1) as BluetoothSocket
                         socket.connect()
                     } catch (e2: Exception) {
-                        // Попытка 3: Прямой порт RFCOMM Channel 1 через рефлексию (как в Serial Bluetooth Terminal)
-                        val method = targetDevice.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
-                        socket = method.invoke(targetDevice, 1) as BluetoothSocket
+                        // Метод 2: Стандартный сокет через SPP UUID
+                        socket = device.createInsecureRfcommSocketToServiceRecord(sppUuid)
                         socket.connect()
                     }
                 }
@@ -156,13 +169,15 @@ class MainActivity : AppCompatActivity() {
                 isConnected = true
 
                 runOnUiThread {
-                    tvStatus.text = "ПОДКЛЮЧЕНО К ${targetDevice.name}"
+                    tvStatus.text = "ПОДКЛЮЧЕНО К ${device.name ?: "HC-06"}"
                     tvStatus.setTextColor(Color.parseColor("#00E676"))
                     startRxLoop()
                 }
             } catch (e: Exception) {
+                isConnected = false
+                try { btSocket?.close() } catch (ignored: Exception) {}
                 runOnUiThread {
-                    tvStatus.text = "Ошибка: ${e.localizedMessage ?: "Сбой сокета"}"
+                    tvStatus.text = "Ошибка: ${e.message ?: "Сбой сокета"}"
                     tvStatus.setTextColor(Color.parseColor("#FF1744"))
                 }
             }
@@ -238,7 +253,7 @@ class MainActivity : AppCompatActivity() {
 
                 graphView.addPoints(targetCurrent, actualCurrent)
 
-            } catch (e: Exception) {
+            } catch (ignored: Exception) {
             }
         }
     }
@@ -252,7 +267,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 outStream?.write(cmd.toByteArray())
                 outStream?.flush()
-            } catch (e: Exception) {
+            } catch (ignored: Exception) {
             }
         }.start()
     }
@@ -262,6 +277,6 @@ class MainActivity : AppCompatActivity() {
         isConnected = false
         try {
             btSocket?.close()
-        } catch (e: Exception) {}
+        } catch (ignored: Exception) {}
     }
 }
