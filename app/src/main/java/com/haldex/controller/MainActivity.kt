@@ -20,7 +20,6 @@ import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
-    // Стандартный SPP UUID для последовательного порта Bluetooth
     private val sppUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     
     private var btSocket: BluetoothSocket? = null
@@ -84,12 +83,11 @@ class MainActivity : AppCompatActivity() {
     private fun checkPermissionsAndShowDevicePicker() {
         val permissions = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // Для сопряженных устройств нужен только CONNECT (без требования геолокации/SCAN)
             permissions.add(android.Manifest.permission.BLUETOOTH_CONNECT)
-            permissions.add(android.Manifest.permission.BLUETOOTH_SCAN)
         } else {
             permissions.add(android.Manifest.permission.BLUETOOTH)
             permissions.add(android.Manifest.permission.BLUETOOTH_ADMIN)
-            permissions.add(android.Manifest.permission.ACCESS_FINE_LOCATION)
         }
 
         val needed = permissions.filter { ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
@@ -105,7 +103,7 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == 101 && grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
             showDeviceSelectionDialog()
         } else {
-            Toast.makeText(this, "Нужны разрешения Bluetooth!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Разрешите доступ к Bluetooth!", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -113,29 +111,29 @@ class MainActivity : AppCompatActivity() {
     private fun showDeviceSelectionDialog() {
         val adapter = BluetoothAdapter.getDefaultAdapter()
         if (adapter == null) {
-            Toast.makeText(this, "Bluetooth не поддерживается!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Bluetooth не найден!", Toast.LENGTH_SHORT).show()
             return
         }
 
         if (!adapter.isEnabled) {
-            Toast.makeText(this, "Включите Bluetooth в телефоне!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Включите Bluetooth!", Toast.LENGTH_SHORT).show()
             return
         }
 
         val pairedDevices: Set<BluetoothDevice> = adapter.bondedDevices ?: emptySet()
 
         if (pairedDevices.isEmpty()) {
-            tvStatus.text = "Нет сопряженных устройств в Android!"
+            tvStatus.text = "Нет сопряжённых устройств в телефоне!"
             tvStatus.setTextColor(Color.parseColor("#FF1744"))
-            Toast.makeText(this, "Сначала спарьте HC-06 в настройках телефона (PIN 1234)!", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Спарьте HC-06 в настройках Android (PIN 1234)!", Toast.LENGTH_LONG).show()
             return
         }
 
         val deviceList = pairedDevices.toList()
-        val deviceNames = deviceList.map { "${it.name ?: "Неизвестно"}\n${it.address}" }.toTypedArray()
+        val deviceNames = deviceList.map { "${it.name ?: "HC-06"}\n${it.address}" }.toTypedArray()
 
         AlertDialog.Builder(this)
-            .setTitle("Выберите модуль для связи:")
+            .setTitle("Выберите ваш модуль:")
             .setItems(deviceNames) { _, which ->
                 connectToDevice(deviceList[which])
             }
@@ -154,18 +152,56 @@ class MainActivity : AppCompatActivity() {
         tvStatus.setTextColor(Color.parseColor("#FFD600"))
 
         Thread {
+            try { adapter.cancelDiscovery() } catch (ignored: Exception) {}
+
+            var socket: BluetoothSocket? = null
+            var success = false
+
+            // 1. Принудительное подключение к RFCOMM Channel 1 (обход бага сокета в HC-06)
             try {
-                // 1. Обязательно отменяем поиск устройств
-                adapter.cancelDiscovery()
-                Thread.sleep(150)
-
-                // 2. Получаем актуальный дескриптор по MAC-адресу
-                val remoteDevice = adapter.getRemoteDevice(device.address)
-
-                // 3. Для HC-06 СТРОГО используется Insecure сокет (без шифрования)
-                val socket = remoteDevice.createInsecureRfcommSocketToServiceRecord(sppUuid)
+                val m = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                socket = m.invoke(device, 1) as BluetoothSocket
                 socket.connect()
+                success = true
+            } catch (e1: Exception) {
+                try { socket?.close() } catch (ignored: Exception) {}
+                socket = null
+            }
 
+            // 2. Если прошивка телефона блокирует вызов канала, пробуем Insecure SPP
+            if (!success) {
+                try {
+                    Thread.sleep(200)
+                    socket = device.createInsecureRfcommSocketToServiceRecord(sppUuid)
+                    socket.connect()
+                    success = true
+                } catch (e2: Exception) {
+                    try { socket?.close() } catch (ignored: Exception) {}
+                    socket = null
+                }
+            }
+
+            // 3. Последняя попытка через стандартный сокет
+            if (!success) {
+                try {
+                    Thread.sleep(200)
+                    socket = device.createRfcommSocketToServiceRecord(sppUuid)
+                    socket.connect()
+                    success = true
+                } catch (e3: Exception) {
+                    try { socket?.close() } catch (ignored: Exception) {}
+                    socket = null
+                    
+                    isConnected = false
+                    runOnUiThread {
+                        tvStatus.text = "Ошибка: ${e3.localizedMessage ?: e3.message ?: "Таймаут сокета"}"
+                        tvStatus.setTextColor(Color.parseColor("#FF1744"))
+                    }
+                    return@Thread
+                }
+            }
+
+            if (success && socket != null) {
                 btSocket = socket
                 outStream = socket.outputStream
                 inStream = socket.inputStream
@@ -175,15 +211,6 @@ class MainActivity : AppCompatActivity() {
                     tvStatus.text = "ПОДКЛЮЧЕНО: $devName"
                     tvStatus.setTextColor(Color.parseColor("#00E676"))
                     startRxLoop()
-                }
-            } catch (e: Exception) {
-                isConnected = false
-                try { btSocket?.close() } catch (ignored: Exception) {}
-                
-                // Выводим ТОЧНЫЙ текст системной ошибки для отладки
-                runOnUiThread {
-                    tvStatus.text = "Ошибка: ${e.localizedMessage ?: e.message ?: "Сбой сокета"}"
-                    tvStatus.setTextColor(Color.parseColor("#FF1744"))
                 }
             }
         }.start()
