@@ -176,8 +176,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun parseTelemetry(line: String) {
-        if (!line.startsWith("$HDX") || !line.endsWith("*")) return
-        val payload = line.replace("$HDX,", "").replace("*", "")
+        // Экранируем символ доллара через \$
+        if (!line.startsWith("\$HDX") || !line.endsWith("*")) return
+        val payload = line.removePrefix("\$HDX,").removeSuffix("*")
         val data = payload.split(",")
         if (data.size < 9) return
 
