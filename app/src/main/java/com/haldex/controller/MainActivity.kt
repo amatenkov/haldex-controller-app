@@ -9,6 +9,7 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothProfile
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -36,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private val rxBuffer = StringBuilder()
 
     private var isAutoBlocked = false
+    private var currentMode = 0
 
     private var currentScreenIndex = 0
     private val totalScreens = 5
@@ -48,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     )
 
     private lateinit var tvStatus: TextView
+    private lateinit var tvTitleView: TextView
     private lateinit var btnPrevScreen: Button
     private lateinit var btnNextScreen: Button
     private lateinit var carouselContainer: FrameLayout
@@ -96,7 +99,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         tvStatus = findViewById(R.id.tvStatus)
-        val tvTitleView = findViewById<TextView>(R.id.tvScreenTitle)
+        tvTitleView = findViewById(R.id.tvScreenTitle)
         btnPrevScreen = findViewById(R.id.btnPrevScreen)
         btnNextScreen = findViewById(R.id.btnNextScreen)
         carouselContainer = findViewById(R.id.carouselContainer)
@@ -144,28 +147,37 @@ class MainActivity : AppCompatActivity() {
             checkPermissionsAndShowDevicePicker()
         }
 
-        btnPrevScreen.setOnClickListener { switchScreen((currentScreenIndex - 1 + totalScreens) % totalScreens, tvTitleView) }
-        btnNextScreen.setOnClickListener { switchScreen((currentScreenIndex + 1) % totalScreens, tvTitleView) }
+        btnPrevScreen.setOnClickListener { switchScreen((currentScreenIndex - 1 + totalScreens) % totalScreens) }
+        btnNextScreen.setOnClickListener { switchScreen((currentScreenIndex + 1) % totalScreens) }
 
-        setupSwipeDetector(tvTitleView)
+        setupSwipeDetector()
 
         btnEco.setOnClickListener { sendCommand("E") }
         btnAuto.setOnClickListener { 
             if (isAutoBlocked) {
-                Toast.makeText(this, "Режим AUTO недоступен в аварийном режиме!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Режим AUTO недоступен в аварии!", Toast.LENGTH_SHORT).show()
             } else {
                 sendCommand("A") 
             }
         }
         btnAwd.setOnClickListener { sendCommand("W") }
-        btnMinus.setOnClickListener { sendCommand("-") }
-        btnPlus.setOnClickListener { sendCommand("+") }
+        
+        // Кнопки регулировки: если не в AWD, сначала включаем AWD
+        btnMinus.setOnClickListener { 
+            if (currentMode != 2) sendCommand("W")
+            sendCommand("-") 
+        }
+        btnPlus.setOnClickListener { 
+            if (currentMode != 2) sendCommand("W")
+            sendCommand("+") 
+        }
+
         btnPump.setOnClickListener { sendCommand("P") }
         btnKill.setOnClickListener { sendCommand("K") }
         btnReset.setOnClickListener { sendCommand("R") }
     }
 
-    private fun switchScreen(index: Int, tvTitleView: TextView) {
+    private fun switchScreen(index: Int) {
         currentScreenIndex = index
         tvTitleView.text = screenTitles[currentScreenIndex]
 
@@ -176,16 +188,16 @@ class MainActivity : AppCompatActivity() {
         pageAwdSetup.visibility = if (index == 4) View.VISIBLE else View.GONE
     }
 
-    private fun setupSwipeDetector(tvTitleView: TextView) {
+    private fun setupSwipeDetector() {
         val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
                 if (e1 == null) return false
                 val diffX = e2.x - e1.x
                 if (Math.abs(diffX) > 80 && Math.abs(velocityX) > 100) {
                     if (diffX < 0) {
-                        switchScreen((currentScreenIndex + 1) % totalScreens, tvTitleView)
+                        switchScreen((currentScreenIndex + 1) % totalScreens)
                     } else {
-                        switchScreen((currentScreenIndex - 1 + totalScreens) % totalScreens, tvTitleView)
+                        switchScreen((currentScreenIndex - 1 + totalScreens) % totalScreens)
                     }
                     return true
                 }
@@ -386,7 +398,7 @@ class MainActivity : AppCompatActivity() {
 
         runOnUiThread {
             try {
-                val mode = d[0].toInt()
+                currentMode = d[0].toInt()
                 val targetLock = d[1].toInt()
                 val measuredCurrentA = d[2].toFloat()
                 val targetCurrentA = d[3].toFloat()
@@ -410,20 +422,19 @@ class MainActivity : AppCompatActivity() {
                 val emergencyCut = d[19].toInt() == 1
                 val currentPWM = d[20].toInt()
 
-                // Флаг блокировки режима AUTO
                 isAutoBlocked = (!canOnline || emergencyCut || hydrFault)
 
-                // График
+                // 1. График
                 graphView.addPoints(targetCurrentA, measuredCurrentA)
 
-                // Колёса
+                // 2. Колёса
                 tvFl.text = String.format("%.1f км/ч", flSpeed)
                 tvFr.text = String.format("%.1f км/ч", frSpeed)
                 tvRl.text = String.format("%.1f км/ч", rlSpeed)
                 tvRr.text = String.format("%.1f км/ч", rrSpeed)
                 tvWheelSlip.text = String.format("БУКС: %+.1f км/ч", slipDiff)
 
-                // CAN
+                // 3. CAN телеметрия
                 tvCanSpeed.text = "Скорость: $vehicleSpeed км/ч"
                 tvCanRpm.text = "Обороты: $engineRPM RPM"
                 tvCanGas.text = "Педаль газа: $pedalPercent%"
@@ -432,7 +443,7 @@ class MainActivity : AppCompatActivity() {
                 tvCanBrake.setTextColor(if (isBraking) Color.parseColor("#FF1744") else Color.parseColor("#00E676"))
                 tvCanPwm.text = "ШИМ клапана N373: $currentPWM / 255"
 
-                // Диагностика
+                // 4. Диагностика
                 tvDiagHydr.text = if (hydrFault) "Гидравлика: ! АВАРИЯ ДАВЛЕНИЯ" else "Гидравлика: OK"
                 tvDiagHydr.setTextColor(if (hydrFault) Color.parseColor("#FF1744") else Color.parseColor("#00E676"))
 
@@ -440,33 +451,53 @@ class MainActivity : AppCompatActivity() {
                 tvDiagCan.setTextColor(if (canOnline) Color.parseColor("#00E676") else Color.parseColor("#FF1744"))
 
                 tvDiagOil.text = "Температура масла: $currentTempC °C (R: $tempRaw)"
-                tvDiagPump.text = if (isPumpEnabled) "Насос V181: ВКЛ (5V)" else "Насос V181: ВЫКЛ (0V)"
+                tvDiagPump.text = if (isPumpEnabled) "Насос V181: ВКЛ" else "Насос V181: ВЫКЛ"
                 tvDiagCut.text = if (emergencyCut) "Отсечки: ! EMERGENCY CUT" else "Отсечки: НЕТ"
                 tvDiagCurrent.text = String.format("Ток соленоида: %.2f А (Цель: %.2f А)", measuredCurrentA, targetCurrentA)
 
-                // Настройка AWD
+                // 5. Настройка AWD
                 tvAwdLockValue.text = "$targetLock%"
                 tvAwdPressure.text = String.format("P(est): ~%.1f bar", (targetLock / 100.0) * 35.0)
                 tvAwdAmps.text = String.format("Ток: %.2f А", targetCurrentA)
 
-                // Подсветка кнопок
-                btnEco.setBackgroundColor(if (mode == 0) Color.parseColor("#00E676") else Color.parseColor("#2E334D"))
-                btnEco.setTextColor(if (mode == 0) Color.parseColor("#0F111A") else Color.WHITE)
+                // =========================================================
+                // НАДЁЖНАЯ ПОДСВЕТКА КНОПОК РЕЖИМОВ (ЧЕРЕЗ backgroundTintList)
+                // =========================================================
+                // Кнопка ECO
+                btnEco.backgroundTintList = ColorStateList.valueOf(
+                    if (currentMode == 0) Color.parseColor("#00E676") else Color.parseColor("#2E334D")
+                )
+                btnEco.setTextColor(if (currentMode == 0) Color.parseColor("#0F111A") else Color.WHITE)
 
-                // Если AUTO заблокирован — делаем кнопку тёмно-серой и неактивной
+                // Кнопка AUTO
                 if (isAutoBlocked) {
-                    btnAuto.setBackgroundColor(Color.parseColor("#151722"))
+                    btnAuto.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#151722"))
                     btnAuto.setTextColor(Color.parseColor("#4A4D5E"))
                 } else {
-                    btnAuto.setBackgroundColor(if (mode == 1) Color.parseColor("#00E5FF") else Color.parseColor("#2E334D"))
-                    btnAuto.setTextColor(if (mode == 1) Color.parseColor("#0F111A") else Color.WHITE)
+                    btnAuto.backgroundTintList = ColorStateList.valueOf(
+                        if (currentMode == 1) Color.parseColor("#00E5FF") else Color.parseColor("#2E334D")
+                    )
+                    btnAuto.setTextColor(if (currentMode == 1) Color.parseColor("#0F111A") else Color.WHITE)
                 }
 
-                btnAwd.setBackgroundColor(if (mode == 2) Color.parseColor("#FFD600") else Color.parseColor("#2E334D"))
-                btnAwd.setTextColor(if (mode == 2) Color.parseColor("#0F111A") else Color.WHITE)
+                // Кнопка AWD
+                btnAwd.backgroundTintList = ColorStateList.valueOf(
+                    if (currentMode == 2) Color.parseColor("#FFD600") else Color.parseColor("#2E334D")
+                )
+                btnAwd.setTextColor(if (currentMode == 2) Color.parseColor("#0F111A") else Color.WHITE)
 
-                btnPump.text = if (isPumpEnabled) "НАСОС: ВКЛ (5V)" else "НАСОС: ВЫКЛ (0V)"
-                btnPump.setTextColor(if (isPumpEnabled) Color.parseColor("#00E676") else Color.parseColor("#8A8D9F"))
+                // =========================================================
+                // ПОДСВЕТКА КНОПКИ НАСОСА (ВКЛ = ЗЕЛЕНЫЙ, ВЫКЛ = ТЕМНЫЙ)
+                // =========================================================
+                if (isPumpEnabled) {
+                    btnPump.text = "НАСОС: ВКЛ (РАБОТАЕТ)"
+                    btnPump.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#00E676"))
+                    btnPump.setTextColor(Color.parseColor("#0F111A"))
+                } else {
+                    btnPump.text = "НАСОС: ВЫКЛ"
+                    btnPump.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#1B1E2E"))
+                    btnPump.setTextColor(Color.parseColor("#8A8D9F"))
+                }
 
             } catch (ignored: Exception) {
             }
