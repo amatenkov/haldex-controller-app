@@ -35,7 +35,8 @@ class MainActivity : AppCompatActivity() {
     private var isConnected = false
     private val rxBuffer = StringBuilder()
 
-    // Управление каруселью экранов
+    private var isAutoBlocked = false
+
     private var currentScreenIndex = 0
     private val totalScreens = 5
     private val screenTitles = arrayOf(
@@ -47,26 +48,22 @@ class MainActivity : AppCompatActivity() {
     )
 
     private lateinit var tvStatus: TextView
-    private lateinit var tvScreenTitle: String
     private lateinit var btnPrevScreen: Button
     private lateinit var btnNextScreen: Button
     private lateinit var carouselContainer: FrameLayout
 
-    // Экраны
     private lateinit var graphView: GraphView
     private lateinit var pageWheels: View
     private lateinit var pageTelemetry: View
     private lateinit var pageDiagnostic: View
     private lateinit var pageAwdSetup: View
 
-    // Элементы экрана Колёс
     private lateinit var tvFl: TextView
     private lateinit var tvFr: TextView
     private lateinit var tvRl: TextView
     private lateinit var tvRr: TextView
     private lateinit var tvWheelSlip: TextView
 
-    // Элементы экрана CAN
     private lateinit var tvCanSpeed: TextView
     private lateinit var tvCanRpm: TextView
     private lateinit var tvCanGas: TextView
@@ -74,7 +71,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvCanBrake: TextView
     private lateinit var tvCanPwm: TextView
 
-    // Элементы экрана Диагностики
     private lateinit var tvDiagHydr: TextView
     private lateinit var tvDiagCan: TextView
     private lateinit var tvDiagOil: TextView
@@ -82,12 +78,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvDiagCut: TextView
     private lateinit var tvDiagCurrent: TextView
 
-    // Элементы экрана Настройки AWD
     private lateinit var tvAwdLockValue: TextView
     private lateinit var tvAwdPressure: TextView
     private lateinit var tvAwdAmps: TextView
 
-    // Кнопки управления
     private lateinit var btnEco: Button
     private lateinit var btnAuto: Button
     private lateinit var btnAwd: Button
@@ -150,15 +144,19 @@ class MainActivity : AppCompatActivity() {
             checkPermissionsAndShowDevicePicker()
         }
 
-        // Переключение карусели
         btnPrevScreen.setOnClickListener { switchScreen((currentScreenIndex - 1 + totalScreens) % totalScreens, tvTitleView) }
         btnNextScreen.setOnClickListener { switchScreen((currentScreenIndex + 1) % totalScreens, tvTitleView) }
 
         setupSwipeDetector(tvTitleView)
 
-        // Отправка команд
         btnEco.setOnClickListener { sendCommand("E") }
-        btnAuto.setOnClickListener { sendCommand("A") }
+        btnAuto.setOnClickListener { 
+            if (isAutoBlocked) {
+                Toast.makeText(this, "Режим AUTO недоступен в аварийном режиме!", Toast.LENGTH_SHORT).show()
+            } else {
+                sendCommand("A") 
+            }
+        }
         btnAwd.setOnClickListener { sendCommand("W") }
         btnMinus.setOnClickListener { sendCommand("-") }
         btnPlus.setOnClickListener { sendCommand("+") }
@@ -292,10 +290,8 @@ class MainActivity : AppCompatActivity() {
                 var notifyChar: BluetoothGattCharacteristic? = null
                 var writeChar: BluetoothGattCharacteristic? = null
 
-                // 1. Поиск точных характеристик UART (FFE1 или Nordic NUS)
                 for (service in gatt.services) {
                     val sUuid = service.uuid.toString().lowercase()
-                    // Игнорируем служебные сервисы Android Generic Access / Info
                     if (sUuid.startsWith("00001800") || sUuid.startsWith("00001801") || sUuid.startsWith("0000180a")) continue
 
                     for (ch in service.characteristics) {
@@ -310,7 +306,6 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // 2. Если точный FFE1 не найден, ищем в кастомных сервисах первый пишущий канал
                 if (writeChar == null) {
                     for (service in gatt.services) {
                         val sUuid = service.uuid.toString().lowercase()
@@ -415,17 +410,20 @@ class MainActivity : AppCompatActivity() {
                 val emergencyCut = d[19].toInt() == 1
                 val currentPWM = d[20].toInt()
 
-                // Обновление графика (Экран 0)
+                // Флаг блокировки режима AUTO
+                isAutoBlocked = (!canOnline || emergencyCut || hydrFault)
+
+                // График
                 graphView.addPoints(targetCurrentA, measuredCurrentA)
 
-                // Обновление Колёс (Экран 1)
+                // Колёса
                 tvFl.text = String.format("%.1f км/ч", flSpeed)
                 tvFr.text = String.format("%.1f км/ч", frSpeed)
                 tvRl.text = String.format("%.1f км/ч", rlSpeed)
                 tvRr.text = String.format("%.1f км/ч", rrSpeed)
                 tvWheelSlip.text = String.format("БУКС: %+.1f км/ч", slipDiff)
 
-                // Обновление CAN Телеметрии (Экран 2)
+                // CAN
                 tvCanSpeed.text = "Скорость: $vehicleSpeed км/ч"
                 tvCanRpm.text = "Обороты: $engineRPM RPM"
                 tvCanGas.text = "Педаль газа: $pedalPercent%"
@@ -434,7 +432,7 @@ class MainActivity : AppCompatActivity() {
                 tvCanBrake.setTextColor(if (isBraking) Color.parseColor("#FF1744") else Color.parseColor("#00E676"))
                 tvCanPwm.text = "ШИМ клапана N373: $currentPWM / 255"
 
-                // Обновление Диагностики (Экран 3)
+                // Диагностика
                 tvDiagHydr.text = if (hydrFault) "Гидравлика: ! АВАРИЯ ДАВЛЕНИЯ" else "Гидравлика: OK"
                 tvDiagHydr.setTextColor(if (hydrFault) Color.parseColor("#FF1744") else Color.parseColor("#00E676"))
 
@@ -446,21 +444,27 @@ class MainActivity : AppCompatActivity() {
                 tvDiagCut.text = if (emergencyCut) "Отсечки: ! EMERGENCY CUT" else "Отсечки: НЕТ"
                 tvDiagCurrent.text = String.format("Ток соленоида: %.2f А (Цель: %.2f А)", measuredCurrentA, targetCurrentA)
 
-                // Обновление Настройки AWD (Экран 4)
+                // Настройка AWD
                 tvAwdLockValue.text = "$targetLock%"
                 tvAwdPressure.text = String.format("P(est): ~%.1f bar", (targetLock / 100.0) * 35.0)
                 tvAwdAmps.text = String.format("Ток: %.2f А", targetCurrentA)
 
-                // Подсветка кнопок режимов внизу
+                // Подсветка кнопок
                 btnEco.setBackgroundColor(if (mode == 0) Color.parseColor("#00E676") else Color.parseColor("#2E334D"))
-                btnAuto.setBackgroundColor(if (mode == 1) Color.parseColor("#00E5FF") else Color.parseColor("#2E334D"))
-                btnAwd.setBackgroundColor(if (mode == 2) Color.parseColor("#FFD600") else Color.parseColor("#2E334D"))
-
                 btnEco.setTextColor(if (mode == 0) Color.parseColor("#0F111A") else Color.WHITE)
-                btnAuto.setTextColor(if (mode == 1) Color.parseColor("#0F111A") else Color.WHITE)
+
+                // Если AUTO заблокирован — делаем кнопку тёмно-серой и неактивной
+                if (isAutoBlocked) {
+                    btnAuto.setBackgroundColor(Color.parseColor("#151722"))
+                    btnAuto.setTextColor(Color.parseColor("#4A4D5E"))
+                } else {
+                    btnAuto.setBackgroundColor(if (mode == 1) Color.parseColor("#00E5FF") else Color.parseColor("#2E334D"))
+                    btnAuto.setTextColor(if (mode == 1) Color.parseColor("#0F111A") else Color.WHITE)
+                }
+
+                btnAwd.setBackgroundColor(if (mode == 2) Color.parseColor("#FFD600") else Color.parseColor("#2E334D"))
                 btnAwd.setTextColor(if (mode == 2) Color.parseColor("#0F111A") else Color.WHITE)
 
-                // Кнопка насоса
                 btnPump.text = if (isPumpEnabled) "НАСОС: ВКЛ (5V)" else "НАСОС: ВЫКЛ (0V)"
                 btnPump.setTextColor(if (isPumpEnabled) Color.parseColor("#00E676") else Color.parseColor("#8A8D9F"))
 
